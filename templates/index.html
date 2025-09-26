@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ultra Fast Video Downloader</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>⚡ Ultra Fast Video Downloader</h1>
+            <p class="subtitle">Download videos from YouTube, Facebook, TikTok, Instagram - No cookies required!</p>
+        </div>
+
+        <div class="main-content">
+            <!-- URL Input Section -->
+            <div class="input-section">
+                <div class="form-group">
+                    <label for="urlInput">🔗 Paste Video URL:</label>
+                    <input type="url" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off">
+                    <div class="error-message" id="urlError"></div>
+                </div>
+
+                <button class="btn-primary" id="fetchInfoBtn" disabled>
+                    🔍 Get Video Info
+                </button>
+            </div>
+
+            <!-- Video Info Section -->
+            <div class="video-info" id="videoInfo" style="display: none;">
+                <div class="thumbnail-container">
+                    <img id="videoThumbnail" src="" alt="Video Thumbnail">
+                </div>
+                <div class="video-details">
+                    <h3 id="videoTitle"></h3>
+                    <p id="videoDuration"></p>
+                </div>
+            </div>
+
+            <!-- Format Selection -->
+            <div class="format-section" id="formatSection" style="display: none;">
+                <label>🎬 Select Quality & Format:</label>
+                <div class="format-grid" id="formatGrid"></div>
+                <div class="loading" id="formatLoading">🔄 Loading formats...</div>
+            </div>
+
+            <!-- Download Progress -->
+            <div class="progress-section" id="progressSection" style="display: none;">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <div class="progress-info">
+                    <span id="progressText">0%</span>
+                    <span id="downloadSpeed"></span>
+                    <span id="fileSize"></span>
+                </div>
+                <button class="btn-download" id="downloadBtn" style="display: none;">
+                    ⬇️ Download Now
+                </button>
+            </div>
+
+            <!-- Batch Download Section -->
+            <div class="batch-section">
+                <div class="batch-header">
+                    <h3>📚 Batch Download (Multiple URLs)</h3>
+                    <button class="btn-secondary" id="toggleBatchBtn">➕ Add Multiple URLs</button>
+                </div>
+                
+                <div class="batch-inputs" id="batchInputs" style="display: none;">
+                    <textarea id="batchUrls" placeholder="Paste one URL per line&#10;Example:&#10;https://www.youtube.com/watch?v=abc123&#10;https://www.youtube.com/watch?v=def456" rows="5"></textarea>
+                    <button class="btn-primary" id="batchDownloadBtn">🚀 Download All</button>
+                    <div class="batch-progress" id="batchProgress" style="display: none;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Download History -->
+        <div class="history-section" id="historySection">
+            <h3>📋 Recent Downloads</h3>
+            <div class="history-list" id="historyList"></div>
+        </div>
+    </div>
+
+    <footer>
+        <p>&copy; 2025 Developer By Utsob | Fast & Secure Video Downloader</p>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
