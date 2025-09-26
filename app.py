@@ -1,54 +1,44 @@
-from flask import Flask, request, render_template, send_file, jsonify, Response, stream_with_context
-from flask_cors import CORS
+from flask import Flask, request, render_template, send_file, jsonify
 import yt_dlp
 import os
 import uuid
-import json
 import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
 import logging
+import tempfile
 
-# লগিং সেটআপ
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)
 
-# কনফিগারেশন
-DOWNLOAD_FOLDER = "downloads"
-MAX_CONCURRENT_DOWNLOADS = 3
-CHUNK_SIZE = 8192
+# Render-compatible download folder (use temp directory)
+DOWNLOAD_FOLDER = tempfile.gettempdir()
 
-if not os.path.exists(DOWNLOAD_FOLDER):
-    os.makedirs(DOWNLOAD_FOLDER)
-
-# ডাউনলোড স্ট্যাটাস ট্র্যাকিং
-download_status = {}
+# FFmpeg path for Render
+FFMPEG_PATH = '/usr/local/bin/ffmpeg'
 
 def get_safe_filename(title):
-    """ফাইলনেম থেকে invalid characters রিমুভ করে"""
+    """Safe filename creation"""
     invalid_chars = '<>:"/\\|?*'
     for char in invalid_chars:
         title = title.replace(char, '_')
-    return title[:100]  # ফাইলনেম length limit
+    return title[:100]
 
 def fix_shorts_url(url):
-    """YouTube Shorts URL কে regular URL এ কনভার্ট করে"""
+    """Fix YouTube Shorts URLs"""
     if 'youtube.com/shorts/' in url:
         video_id = url.split('/')[-1].split('?')[0]
         return f'https://www.youtube.com/watch?v={video_id}'
     return url
 
 def get_video_info(url):
-    """ভিডিওর তথ্য fetch করে"""
+    """Get video information"""
     try:
         url = fix_shorts_url(url)
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': False,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -59,7 +49,7 @@ def get_video_info(url):
         return None
 
 def get_available_formats(url):
-    """ভিডিওর available ফরম্যাটগুলো রিটার্ন করে"""
+    """Get available formats"""
     try:
         info = get_video_info(url)
         if not info:
@@ -67,127 +57,97 @@ def get_available_formats(url):
         
         formats = []
         
-        # বেস্ট কোয়ালিটি অপশন
+        # Best quality options
         formats.append({
             'format_id': 'best',
             'name': '🚀 Best Quality (Auto)',
-            'resolution': 'best',
             'type': 'video',
             'ext': 'mp4'
         })
         
-        # MP3 অডিও অপশন
+        # Audio options
         formats.append({
             'format_id': 'mp3',
             'name': '🎵 MP3 Audio (192kbps)',
-            'resolution': 'audio',
             'type': 'audio',
             'ext': 'mp3'
         })
         
-        # available ভিডিও ফরম্যাটগুলো
-        video_formats = []
+        # Video formats
         for f in info.get('formats', []):
-            if f.get('video_ext') != 'none' and f.get('height') is not None:
+            if f.get('height') and f.get('acodec') != 'none' and f.get('vcodec') != 'none':
                 format_name = f"{f['height']}p"
-                
-                # ফ্রেম রেট
                 if f.get('fps'):
                     format_name += f" ({int(f['fps'])}fps)"
                 
-                # ফাইল সাইজ
                 filesize = f.get('filesize') or f.get('filesize_approx')
                 if filesize:
                     size_mb = filesize / (1024 * 1024)
                     format_name += f" - {size_mb:.1f}MB"
                 
-                # কোডেক তথ্য
-                if f.get('vcodec') and f.get('vcodec') != 'none':
-                    format_name += f" ({f['vcodec'].split('.')[0]})"
-                
-                video_formats.append({
+                formats.append({
                     'format_id': f['format_id'],
                     'name': format_name,
-                    'resolution': f'{f["height"]}p',
                     'type': 'video',
-                    'height': f['height'],
                     'ext': 'mp4',
-                    'filesize': filesize
+                    'height': f['height']
                 })
         
-        # রেজোলিউশন অনুযায়ী সাজানো (উচ্চ থেকে নিম্ন)
-        video_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
-        
-        # ডুপ্লিকেট রিমুভ
+        # Remove duplicates and sort
         unique_formats = []
-        seen_resolutions = set()
-        
-        for fmt in video_formats:
-            if fmt['resolution'] not in seen_resolutions:
+        seen = set()
+        for fmt in formats:
+            if fmt['format_id'] not in seen:
                 unique_formats.append(fmt)
-                seen_resolutions.add(fmt['resolution'])
+                seen.add(fmt['format_id'])
         
-        return formats + unique_formats[:10]  # সর্বোচ্চ ১০টি ফরম্যাট
+        return sorted(unique_formats, key=lambda x: x.get('height', 0), reverse=True)[:10]
         
     except Exception as e:
         logger.error(f"Error getting formats: {e}")
         return [
-            {'format_id': 'best', 'name': 'Best Quality (Auto)', 'resolution': 'best', 'type': 'video', 'ext': 'mp4'},
-            {'format_id': 'mp3', 'name': 'MP3 Audio', 'resolution': 'audio', 'type': 'audio', 'ext': 'mp3'}
+            {'format_id': 'best', 'name': 'Best Quality', 'type': 'video', 'ext': 'mp4'},
+            {'format_id': 'mp3', 'name': 'MP3 Audio', 'type': 'audio', 'ext': 'mp3'},
         ]
 
+# Download status tracking
+download_status = {}
+
 def download_video(download_id, url, format_id, title):
-    """ভিডিও ডাউনলোড করার ফাংশন"""
+    """Download video with progress tracking"""
     try:
         url = fix_shorts_url(url)
         safe_title = get_safe_filename(title)
-        output_template = os.path.join(DOWNLOAD_FOLDER, f'{download_id}_{safe_title}.%(ext)s')
+        output_path = os.path.join(DOWNLOAD_FOLDER, f'{download_id}_{safe_title}.%(ext)s')
         
-        # প্রোগ্রেস হুক
         def progress_hook(d):
             if d['status'] == 'downloading':
-                percent = d.get('_percent_str', '0%').strip()
-                speed = d.get('_speed_str', 'N/A')
-                total_size = d.get('_total_bytes_str', 'N/A')
-                downloaded = d.get('_downloaded_bytes_str', 'N/A')
-                
                 download_status[download_id] = {
                     'status': 'downloading',
-                    'percent': percent,
-                    'speed': speed,
-                    'total_size': total_size,
-                    'downloaded': downloaded,
-                    'filename': d.get('filename', '')
+                    'percent': d.get('_percent_str', '0%'),
+                    'speed': d.get('_speed_str', 'N/A'),
+                    'total_size': d.get('_total_bytes_str', 'N/A'),
+                    'downloaded': d.get('_downloaded_bytes_str', 'N/A'),
                 }
-                
             elif d['status'] == 'finished':
                 download_status[download_id] = {
                     'status': 'finished',
-                    'filename': d.get('filename', ''),
-                    'final_filename': d['filename']
+                    'filename': d['filename']
                 }
         
-        # ফরম্যাট সিলেকশন
-        if format_id == 'best':
-            ydl_format = 'bestvideo+bestaudio/best'
-        elif format_id == 'mp3':
-            ydl_format = 'bestaudio/best'
-        else:
-            ydl_format = f'{format_id}+bestaudio/best'
-        
+        # YouTube DL options
         ydl_opts = {
-            'outtmpl': output_template,
-            'format': ydl_format,
-            'merge_output_format': 'mp4',
+            'outtmpl': output_path,
             'quiet': False,
             'no_warnings': False,
-            'noplaylist': True,
             'progress_hooks': [progress_hook],
-            'http_chunk_size': 10 * 1024 * 1024,  # 10MB chunks for faster download
+            'ffmpeg_location': FFMPEG_PATH,
         }
         
-        # MP3 এর জন্য
-        if format_id == 'mp3':
+        # Format selection
+        if format_id == 'best':
+            ydl_opts['format'] = 'bestvideo+bestaudio/best'
+        elif format_id == 'mp3':
             ydl_opts.update({
                 'format': 'bestaudio/best',
                 'postprocessors': [{
@@ -195,15 +155,18 @@ def download_video(download_id, url, format_id, title):
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
-                'extractaudio': True,
             })
+        else:
+            ydl_opts['format'] = f'{format_id}+bestaudio/best'
+        
+        ydl_opts['merge_output_format'] = 'mp4'
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             final_filename = ydl.prepare_filename(info)
             
             if format_id == 'mp3':
-                final_filename = final_filename.replace('.webm', '.mp3').replace('.m4a', '.mp3').replace('.mp4', '.mp3')
+                final_filename = final_filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
             
             return final_filename
             
@@ -216,19 +179,19 @@ def download_video(download_id, url, format_id, title):
         return None
 
 @app.route('/')
-def index():
+def home():
     return render_template('index.html')
 
 @app.route('/get_info', methods=['POST'])
 def get_info():
-    """ভিডিও তথ্য fetch করে"""
-    data = request.json
-    url = data.get('url', '')
-    
-    if not url:
-        return jsonify({'error': 'URL is required'}), 400
-    
+    """Get video information"""
     try:
+        data = request.get_json()
+        url = data.get('url', '').strip()
+        
+        if not url:
+            return jsonify({'error': 'URL is required'}), 400
+        
         info = get_video_info(url)
         if not info:
             return jsonify({'error': 'Could not fetch video information'}), 400
@@ -241,120 +204,105 @@ def get_info():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 400
+        logger.error(f"Error in get_info: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/start_download', methods=['POST'])
 def start_download():
-    """ডাউনলোড শুরু করে"""
-    data = request.json
-    url = data.get('url', '')
-    format_id = data.get('format_id', 'best')
-    title = data.get('title', 'video')
-    
-    if not url:
-        return jsonify({'error': 'URL is required'}), 400
-    
-    download_id = str(uuid.uuid4())
-    
-    # ব্যাকগ্রাউন্ডে ডাউনলোড শুরু
-    thread = threading.Thread(
-        target=download_video,
-        args=(download_id, url, format_id, title)
-    )
-    thread.daemon = True
-    thread.start()
-    
-    return jsonify({'download_id': download_id})
+    """Start download process"""
+    try:
+        data = request.get_json()
+        url = data.get('url', '').strip()
+        format_id = data.get('format_id', 'best')
+        title = data.get('title', 'video')
+        
+        if not url:
+            return jsonify({'error': 'URL is required'}), 400
+        
+        download_id = str(uuid.uuid4())
+        
+        # Start download in background thread
+        thread = threading.Thread(
+            target=download_video,
+            args=(download_id, url, format_id, title),
+            daemon=True
+        )
+        thread.start()
+        
+        return jsonify({
+            'download_id': download_id,
+            'message': 'Download started successfully'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in start_download: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/download_status/<download_id>')
-def get_download_status(download_id):
-    """ডাউনলোড স্ট্যাটাস চেক করে"""
-    status = download_status.get(download_id, {'status': 'unknown'})
-    return jsonify(status)
+def download_status_check(download_id):
+    """Check download status"""
+    try:
+        status = download_status.get(download_id, {'status': 'unknown'})
+        return jsonify(status)
+    except Exception as e:
+        logger.error(f"Error in download_status: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
 
 @app.route('/download_file/<download_id>')
 def download_file(download_id):
-    """ডাউনলোড করা ফাইল ফেরত দেয়"""
-    status = download_status.get(download_id, {})
-    
-    if status.get('status') != 'finished':
-        return jsonify({'error': 'Download not completed'}), 400
-    
-    filename = status.get('final_filename')
-    
-    if not filename or not os.path.exists(filename):
-        return jsonify({'error': 'File not found'}), 404
-    
-    # ফাইলনেম সেফ করা
-    safe_filename = os.path.basename(filename).split('_', 1)[-1] if '_' in os.path.basename(filename) else os.path.basename(filename)
-    
-    response = send_file(
-        filename,
-        as_attachment=True,
-        download_name=safe_filename,
-        mimetype='application/octet-stream'
-    )
-    
-    # ফাইল ডাউনলোড পর ক্লিনআপ
-    @response.call_on_close
-    def cleanup():
-        try:
-            if os.path.exists(filename):
-                os.remove(filename)
-                logger.info(f"Cleaned up file: {filename}")
-        except Exception as e:
-            logger.error(f"Error cleaning up file: {e}")
-    
-    return response
+    """Download completed file"""
+    try:
+        status = download_status.get(download_id, {})
+        
+        if status.get('status') != 'finished':
+            return jsonify({'error': 'Download not completed'}), 400
+        
+        filename = status.get('filename')
+        if not filename or not os.path.exists(filename):
+            return jsonify({'error': 'File not found'}), 404
+        
+        # Create safe filename for download
+        safe_filename = get_safe_filename(f"video_{download_id[:8]}")
+        if filename.endswith('.mp3'):
+            safe_filename += '.mp3'
+        else:
+            safe_filename += '.mp4'
+        
+        response = send_file(
+            filename,
+            as_attachment=True,
+            download_name=safe_filename
+        )
+        
+        # Cleanup after download
+        @response.call_on_close
+        def cleanup():
+            try:
+                if os.path.exists(filename):
+                    os.remove(filename)
+                    logger.info(f"Cleaned up file: {filename}")
+            except Exception as e:
+                logger.error(f"Error cleaning up: {e}")
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error in download_file: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
-@app.route('/batch_download', methods=['POST'])
-def batch_download():
-    """মাল্টিপল URLs ডাউনলোড করে"""
-    data = request.json
-    urls = data.get('urls', [])
-    format_id = data.get('format_id', 'best')
-    
-    if not urls:
-        return jsonify({'error': 'URLs are required'}), 400
-    
-    batch_id = str(uuid.uuid4())
-    download_status[batch_id] = {
-        'status': 'processing',
-        'total': len(urls),
-        'completed': 0,
-        'downloads': {}
-    }
-    
-    def download_batch():
-        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DOWNLOADS) as executor:
-            futures = []
-            for i, url in enumerate(urls):
-                download_id = f"{batch_id}_{i}"
-                future = executor.submit(download_video, download_id, url, format_id, f"video_{i}")
-                futures.append((download_id, future))
-            
-            for download_id, future in futures:
-                try:
-                    result = future.result()
-                    download_status[batch_id]['completed'] += 1
-                    download_status[batch_id]['downloads'][download_id] = {
-                        'status': 'finished' if result else 'error',
-                        'filename': result
-                    }
-                except Exception as e:
-                    download_status[batch_id]['downloads'][download_id] = {
-                        'status': 'error',
-                        'error': str(e)
-                    }
-            
-            download_status[batch_id]['status'] = 'finished'
-    
-    thread = threading.Thread(target=download_batch)
-    thread.daemon = True
-    thread.start()
-    
-    return jsonify({'batch_id': batch_id})
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({'error': 'Endpoint not found'}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({'error': 'Internal server error'}), 500
+
+# Health check endpoint for Render
+@app.route('/health')
+def health_check():
+    return jsonify({'status': 'healthy', 'message': 'Server is running'})
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
